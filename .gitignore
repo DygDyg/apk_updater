@@ -7,12 +7,14 @@ venv/
 data/apk_updater.db
 data/apk_updater.pid
 data/startup_error.log
+data/startup_out.log
 data/restart.log
+data/pidtrace.txt
 data/cache/
 data/logs/
 data/tools/
-data/_restart_once.bat
-data/_self_update_apply.bat
+data/_*.bat
+data/*
 .idea/
 .vscode/
 *.apk

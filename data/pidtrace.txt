@@ -1,1 +1,0 @@
-pid=52000 ppid=51344 argv=['E:\\python\\apk_updater\\_spawn_test.py']
