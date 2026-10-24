@@ -1,0 +1,26 @@
+---
+description: React/Vite UI apk_updater
+globs: web/src/**
+alwaysApply: false
+---
+
+# Frontend web
+
+## Файлы
+
+- `web/src/App.tsx` — весь UI (большой): **Grep**, не читай файл целиком
+- `web/src/api.ts` — единственная точка HTTP/SSE к backend
+- `web/src/styles.css` — тема (accent `#2dd4bf`, dark)
+
+## Паттерны
+
+- Новые API-вызовы только через функции в `api.ts`
+- Долгие операции: `fetch` + `readSse` / существующие `*Updates` helpers
+- Счётчики обновлений: `totalUpdates` (все) vs `selectedUpdateCount` (устройство)
+- Кнопки check/install: слева сайдбар = все устройства, справа карточка = выбранное
+- Модалки: устройство (`deviceInfo`), приложение (`appDetails` — там «Не обновлять»)
+- После правок UI: `cd web && npm run build` (сервит `web/dist`)
+
+## Стили
+
+Классы `btn`, `btn-accent`, `btn-ghost`, `card`, `row-*`. Не вводить чужой UI-kit.

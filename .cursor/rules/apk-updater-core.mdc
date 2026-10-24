@@ -1,0 +1,34 @@
+---
+description: Карта проекта apk_updater — стек, пути, конвенции
+alwaysApply: true
+---
+
+# apk_updater — core
+
+Локальный FastAPI + React (Vite) для Wi‑Fi ADB: обновления APK из сторов, установка, действия на устройстве. Порт **8765**, tray.
+
+## Дерево
+
+- `app/api/routers/` — HTTP; `schemas.py`, `serialize.py`, `sse_job.py`
+- `app/services/` — devices, apps, updates, batch_jobs, background, device_actions, package_sources, update_ignores
+- `app/adb/client.py` — ADB shell, wake, timer/alarm, screencap
+- `web/src/App.tsx` + `api.ts` + `styles.css`
+- `data/` — DB, cache, logs; `docs/` — on-demand архитектура
+
+Перед фичей читай `@docs/ARCHITECTURE.md` и при необходимости `@docs/API-MAP.md`.
+
+## Конвенции
+
+- UI и сообщения — русский
+- Долгие задачи → SSE (`sse_job.py`)
+- Online device → `prepare_online` / `AdbClient`
+- Ignore updates → `update_ignores` + `PUT /api/apps/update-ignore`
+- Device sound → `play_timer` | `play_alarm` (без auto volume boost); alarm dex: `app/resources/play_alarm.dex`
+- Deploy: `deploy_release.bat`, SRC ≠ DST (не Z:→Z:)
+- Log: `data/logs/updates.log`
+
+## Агент
+
+- Не читай весь `App.tsx` — Grep/offset
+- После UI: `npm run build` в `web/`
+- Не дублировать user-adb вторым Android MCP

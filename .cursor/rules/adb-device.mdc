@@ -1,0 +1,29 @@
+---
+description: Wi-Fi ADB, действия на устройстве, TV vs phone
+globs: app/adb/**/*.py,app/services/device*.py,app/services/discovery.py,app/services/scrcpy_service.py,app/resources/**
+alwaysApply: false
+---
+
+# ADB / устройства
+
+## Клиент
+
+- `AdbClient` — свой ADB server socket `5038`, чтобы не конфликтовать со Studio
+- `prepare_for_work` — probe shell; wake только если молчит
+- `nudge_awake` / `set_stay_awake` — MIUI/HyperOS Wi‑Fi freeze
+- `detect_form_factor` → `mobile` | `tv` (+ sdk)
+
+## Действия UI (`device_actions`)
+
+- `wake`, `play_timer`, `play_alarm`, mute/unmute, volume_up/down, stay_awake_*
+- **Таймер** (`play_set_timer`): SET_TIMER; на secure lock часто звенит только после unlock
+- **Alarm** (`play_alarm_tone`): dex `play_alarm.dex` → USAGE_ALARM (~8 с), **без** `_nudge_audible` / VOLUME_UP
+- Скрин: screencap (+ pull на MiTV); кеш `data/cache/screencaps/`
+- scrcpy: bootstrap в `data/tools/scrcpy`, UI скрыт
+
+## Discovery
+
+- mDNS + legacy TCP `:5555`; предпочитать LAN `192.168.*` ложным `172.*`
+- Логическое устройство: несколько transports, лучший канал + резерв
+
+При живом девайсе для проверки звука/UI можно использовать уже подключённый MCP **user-adb** (не ставить второй Android-MCP).

@@ -1,0 +1,32 @@
+---
+description: Слои FastAPI backend apk_updater
+globs: app/**/*.py
+alwaysApply: false
+---
+
+# Backend Python
+
+## Слои
+
+1. **Routers** (`app/api/routers/`) — HTTP, валидация body, `HTTPException`
+2. **Services** (`app/services/`) — логика устройств, обновлений, установки
+3. **ADB / DB** — `app/adb/client.py`, `app/db/database.py` + `schema.sql`
+
+Состояние процесса: `app/api/state.py` (`AppState` — apps/updates cache, job lock).
+
+## Паттерны
+
+- Pydantic-модели запросов/ответов — только в `app/api/schemas.py`
+- Ответ списка приложений — `serialize.app_out(...)` (учитывает `update_ignored`)
+- Batch check/install — `batch_jobs.run_check_batch` / `run_install_all`
+- Фон (TTL / auto-install) — `background.py` + `activity_log` / `update_file_log`
+- Сторы — `app/providers/*`, порядок в `stores.py`
+
+## Новая фича (чеклист)
+
+1. Таблица в `schema.sql` при необходимости (migrate = executescript IF NOT EXISTS)
+2. Сервис + endpoint в подходящем router
+3. При apps/updates — прокинуть через `app_out` / `_apps_payload`
+4. Фронт: `web/src/api.ts` → UI
+
+Карта URL: `@docs/API-MAP.md`.
