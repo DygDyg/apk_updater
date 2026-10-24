@@ -43,3 +43,9 @@ run_apk_updater.bat
 ```
 
 UI после правок фронта: `cd web && npm run build`.
+
+## Релиз (портатив)
+
+- Сборка: `BUILD_ID` в `app/build_info.py` (`YYYYMMDD-HHMMSS` или `dev`).
+- Публикация: `publish_release.bat` → GitHub Release `APKUpdater-windows-x64.zip`.
+- Автообновление EXE: `app/services/self_update.py`, API `/api/app-update/*`.
