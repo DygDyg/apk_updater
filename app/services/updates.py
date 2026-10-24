@@ -17,6 +17,8 @@ from app.services.install import InstallResult, InstallService
 PLAY_INSTALLER = "com.android.vending"
 ProgressCb = Callable[[str], None]
 ItemProgressCb = Callable[[str, str, str], None]  # serial, phase, detail
+# done_bytes, total_bytes (None if unknown)
+DownloadProgressCb = Callable[[int, int | None], None]
 RemoteProgressCb = Callable[[int, int, str], None]
 
 
@@ -424,14 +426,108 @@ class UpdateService:
             )
         return results
 
-    def download_to_cache(self, update: UpdateInfo, *, progress: ProgressCb | None = None) -> ApkArtifact:
+    def download_to_cache(
+        self,
+        update: UpdateInfo,
+        *,
+        progress: ProgressCb | None = None,
+        download_progress: DownloadProgressCb | None = None,
+    ) -> ApkArtifact:
         if not update.remote:
             raise RuntimeError("No remote version to download")
         remote = update.remote
         dest = self.cache.apk_path(update.package_name, remote.version_code)
-        if dest.is_file() and dest.stat().st_size > 1024:
+        splits_dir = dest.parent / f"{remote.version_code}_splits"
+        from app.providers.xapk_util import (
+            artifact_from_extracted,
+            extract_xapk,
+            is_xapk_archive,
+            load_extracted_splits,
+            url_looks_like_xapk,
+        )
+
+        cached_splits = load_extracted_splits(splits_dir, update.package_name)
+        if len(cached_splits) > 1:
+            if progress:
+                progress(f"Кеш (XAPK): {len(cached_splits)} APK")
+            if download_progress is not None:
+                try:
+                    total = sum(p.stat().st_size for p in cached_splits)
+                    download_progress(total, total)
+                except Exception:  # noqa: BLE001
+                    pass
+            artifact = ApkArtifact(
+                package_name=update.package_name,
+                version_name=remote.version_name,
+                version_code=remote.version_code,
+                source=remote.source,
+                file_path=cached_splits[0],
+                download_url=remote.download_url,
+                split_apks=cached_splits[1:],
+            )
+            self._record_cache(artifact)
+            return artifact
+
+        # Old builds saved raw XAPK as «N.apk» — detect and unpack instead of
+        # installing the container (INSTALL_FAILED_MISSING_SPLIT).
+        if dest.is_file() and dest.stat().st_size > 1024 and is_xapk_archive(dest):
+            if progress:
+                progress(f"Распаковка XAPK из кеша: {dest.name}")
+            xapk_path = dest.with_suffix(".xapk")
+            try:
+                if xapk_path.exists():
+                    xapk_path.unlink()
+                dest.replace(xapk_path)
+            except OSError:
+                xapk_path = dest
+            extracted = extract_xapk(
+                xapk_path, splits_dir, expected_package=update.package_name
+            )
+            artifact = artifact_from_extracted(
+                extracted,
+                package_name=update.package_name,
+                version_name=remote.version_name,
+                version_code=remote.version_code,
+                source=remote.source,
+                download_url=remote.download_url,
+                single_apk_dest=dest if len(extracted.apks) == 1 else None,
+            )
+            try:
+                if xapk_path != dest and xapk_path.is_file() and artifact.split_apks:
+                    xapk_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if download_progress is not None:
+                try:
+                    total = artifact.file_path.stat().st_size + sum(
+                        p.stat().st_size for p in artifact.split_apks
+                    )
+                    download_progress(total, total)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._record_cache(artifact)
+            return artifact
+
+        # Remote is XAPK but cache has a lone base APK → force re-download.
+        if (
+            dest.is_file()
+            and dest.stat().st_size > 1024
+            and url_looks_like_xapk(remote.download_url)
+            and not is_xapk_archive(dest)
+        ):
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        elif dest.is_file() and dest.stat().st_size > 1024:
             if progress:
                 progress(f"Кеш: {dest.name}")
+            if download_progress is not None:
+                try:
+                    size = dest.stat().st_size
+                    download_progress(size, size)
+                except Exception:  # noqa: BLE001
+                    pass
             artifact = ApkArtifact(
                 package_name=update.package_name,
                 version_name=remote.version_name,
@@ -450,8 +546,10 @@ class UpdateService:
             dest.parent,
             remote=remote,
             enabled=self.enabled_store_sources(),
+            progress=download_progress,
         )
-        if artifact.file_path.resolve() != dest.resolve():
+        # Single APK: normalize to cache path. Split packages stay in *_splits/.
+        if not artifact.split_apks and artifact.file_path.resolve() != dest.resolve():
             dest.parent.mkdir(parents=True, exist_ok=True)
             if artifact.file_path.is_file():
                 artifact.file_path.replace(dest)
@@ -462,6 +560,8 @@ class UpdateService:
                     source=artifact.source,
                     file_path=dest,
                     download_url=artifact.download_url,
+                    split_apks=artifact.split_apks,
+                    obb_files=artifact.obb_files,
                 )
         self._record_cache(artifact)
         return artifact
@@ -473,14 +573,25 @@ class UpdateService:
         *,
         progress: ProgressCb | None = None,
         item_progress: ItemProgressCb | None = None,
+        download_progress: DownloadProgressCb | None = None,
     ) -> tuple[ApkArtifact, list[InstallResult]]:
-        artifact = self.download_to_cache(update, progress=progress)
+        artifact = self.download_to_cache(
+            update, progress=progress, download_progress=download_progress
+        )
         if progress:
-            progress(f"Установка {artifact.file_path.name}…")
+            n = 1 + len(artifact.split_apks)
+            progress(
+                f"Установка {artifact.file_path.name}"
+                + (f" (+{n - 1} split)" if n > 1 else "")
+                + "…"
+            )
         results = self.install.install_on_devices(
             artifact.file_path,
             serials,
             item_progress=item_progress,
+            split_apks=artifact.split_apks,
+            obb_files=artifact.obb_files,
+            package_name=artifact.package_name,
         )
         for r in results:
             self.db.execute(

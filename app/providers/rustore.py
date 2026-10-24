@@ -403,7 +403,12 @@ class RuStoreProvider(ApkProvider):
         ]
 
     def download(
-        self, package_name: str, dest_dir: Path, *, remote: RemoteVersion | None = None
+        self,
+        package_name: str,
+        dest_dir: Path,
+        *,
+        remote: RemoteVersion | None = None,
+        progress=None,
     ) -> ApkArtifact:
         info = remote or self.get_latest(package_name)
         if info is None:
@@ -427,7 +432,12 @@ class RuStoreProvider(ApkProvider):
         if lower.endswith(".zip"):
             suffix = ".zip"
         dest = dest_dir / f"{version_code}{suffix}"
-        download_file(apk_url, dest, headers=self._api_headers(ver_code=_VER_CODE_PRIMARY))
+        download_file(
+            apk_url,
+            dest,
+            headers=self._api_headers(ver_code=_VER_CODE_PRIMARY),
+            progress=progress,
+        )
         return ApkArtifact(
             package_name=package_name,
             version_name=version_name,

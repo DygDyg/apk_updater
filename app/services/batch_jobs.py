@@ -67,6 +67,7 @@ def _apps_payload(state: AppState, serial: str) -> list[dict[str, Any]]:
                 update_ignored=app.package_name in ignored,
                 install_flag=str(fl.get("flag") or ""),
                 install_flag_source=str(fl.get("source") or ""),
+                install_flag_message=str(fl.get("message") or ""),
             ).model_dump()
         )
     return out
@@ -265,6 +266,12 @@ def run_check_batch(
             checked_sources=checked_sources,
         )
         state.set_updates(serial, mapping)
+        try:
+            from app.services.install_flags import refresh_flags_after_check
+
+            refresh_flags_after_check(state.db, serial, mapping)
+        except Exception:  # noqa: BLE001
+            pass
         devices_out[serial] = _apps_payload(state, serial)
 
     if record_bg_run:
@@ -304,14 +311,13 @@ def run_install_all(
             progress(msg)
 
     from app.services.install_flags import (
-        FLAG_OLDER_SDK,
-        FLAG_SIGNATURE,
+        AUTO_BLOCK_FLAGS,
         clear_flag,
+        flag_blocks_auto,
+        flag_label,
         list_flags,
         set_flag,
     )
-
-    _AUTO_SKIP_FLAGS = {FLAG_SIGNATURE, FLAG_OLDER_SDK}
     from app.services.package_sources import resolve_preferred_source
     from app.services.update_ignores import list_ignored
 
@@ -339,34 +345,27 @@ def run_install_all(
         mapping = state.get_updates(serial)
         apps_by_pkg = {a.package_name: a for a in state.get_apps(serial)}
         ignored = list_ignored(state.db, serial)
-        flags = list_flags(state.db, serial) if same_source_only else {}
+        flags = list_flags(state.db, serial)
         for pkg, upd in mapping.items():
             if not upd.has_update:
                 continue
             if pkg in ignored:
                 skipped_ignored += 1
                 continue
+            fl = flags.get(pkg) or {}
+            fl_code = fl.get("flag") or ""
+            if flag_blocks_auto(fl_code):
+                # Blocked until user clears flag or check sees a new remote build
+                skipped_flag += 1
+                prog(
+                    f"Пропуск ({flag_label(fl_code) or fl_code}): {upd.label or pkg} "
+                    f"на {device_label(serial)}"
+                    + (f" — {(fl.get('message') or '').split(chr(10), 1)[0]}" if fl.get("message") else "")
+                )
+                continue
             has_update_n += 1
             remote_src = upd.remote.source if upd.remote else ""
             if same_source_only:
-                fl = flags.get(pkg) or {}
-                fl_code = fl.get("flag") or ""
-                if fl_code in _AUTO_SKIP_FLAGS:
-                    # Permanent-ish install fail — don't loop in auto/catch-up
-                    skipped_flag += 1
-                    fl_name = (
-                        "подпись"
-                        if fl_code == FLAG_SIGNATURE
-                        else "старый Android"
-                        if fl_code == FLAG_OLDER_SDK
-                        else fl_code
-                    )
-                    prog(
-                        f"Пропуск (пометка «{fl_name}»): {upd.label or pkg} "
-                        f"на {device_label(serial)} "
-                        f"(flag_src={fl.get('source') or '—'}, remote={remote_src or '—'})"
-                    )
-                    continue
                 app = apps_by_pkg.get(pkg)
                 preferred = resolve_preferred_source(
                     state.db,
@@ -416,7 +415,7 @@ def run_install_all(
         if skipped_ignored:
             bits.append(f"пропуск «не обновлять»={skipped_ignored}")
         if skipped_flag:
-            bits.append(f"пропуск «подпись»={skipped_flag}")
+            bits.append(f"пропуск с пометкой={skipped_flag}")
         if same_source_only:
             bits.append(f"пропуск из‑за стора={skipped_source}")
         if skipped_offline:
@@ -496,6 +495,33 @@ def run_install_all(
                     }
                 )
 
+        def on_download(
+            done: int,
+            total: int | None,
+            _pkg=pkg,
+            _label=app_label,
+            _serials=ser_list,
+        ) -> None:
+            from app.providers.http_util import format_download_progress
+
+            detail, pct = format_download_progress(done, total)
+            for s in _serials:
+                prog(
+                    {
+                        "type": "install_item",
+                        "id": f"{_pkg}::{s}",
+                        "package": _pkg,
+                        "app_label": _label,
+                        "serial": s,
+                        "device_label": device_label(s),
+                        "status": "downloading",
+                        "detail": detail,
+                        "download_pct": pct,
+                        "download_bytes": done,
+                        "download_total": total,
+                    }
+                )
+
         try:
             for s in ser_list:
                 prog(
@@ -506,8 +532,8 @@ def run_install_all(
                         "app_label": app_label,
                         "serial": s,
                         "device_label": device_label(s),
-                        "status": "installing",
-                        "detail": "Установка…",
+                        "status": "downloading",
+                        "detail": "Скачивание…",
                     }
                 )
             _artifact, results = state.updates.download_and_install(
@@ -526,6 +552,7 @@ def run_install_all(
                         "detail": detail,
                     }
                 ),
+                download_progress=on_download,
             )
         except Exception as exc:  # noqa: BLE001
             fail += len(ser_list)
@@ -588,8 +615,14 @@ def run_install_all(
             else:
                 fail += 1
                 src_tried = upd.remote.source if upd.remote else ""
-                if r.error_code in _AUTO_SKIP_FLAGS:
+                if r.error_code in AUTO_BLOCK_FLAGS:
                     try:
+                        remote_vc = 0
+                        if upd.remote is not None:
+                            try:
+                                remote_vc = int(upd.remote.version_code or 0)
+                            except (TypeError, ValueError):
+                                remote_vc = 0
                         set_flag(
                             state.db,
                             r.serial,
@@ -597,21 +630,17 @@ def run_install_all(
                             flag=r.error_code,
                             source=src_tried,
                             message=r.message or r.error_title or "",
+                            version_code=remote_vc,
                         )
                     except Exception:  # noqa: BLE001
                         pass
                     # Don't enqueue endless retries for permanent incompatibility
                     state.db.clear_pending(r.serial, kind="install", package_name=pkg)
-                    if r.error_code == FLAG_SIGNATURE:
-                        prog(
-                            f"Пометка «подпись не совпала»: {app_label} "
-                            f"на {device_label(r.serial)} (стор={src_tried or '—'})"
-                        )
-                    else:
-                        prog(
-                            f"Пометка «нужен новее Android»: {app_label} "
-                            f"на {device_label(r.serial)} (стор={src_tried or '—'})"
-                        )
+                    prog(
+                        f"Пометка «{flag_label(r.error_code) or r.error_code}»: {app_label} "
+                        f"на {device_label(r.serial)} (стор={src_tried or '—'}) "
+                        f"— исключено из автообновления"
+                    )
                 else:
                     state.db.enqueue_pending(
                         r.serial,

@@ -982,6 +982,29 @@ class AdbClient:
         # Large APKs may take a while
         return self.run(args, serial=serial, check=False, timeout=300.0)
 
+    def install_multiple(
+        self,
+        serial: str,
+        apk_paths: list[str | Path],
+        *,
+        replace: bool = True,
+        allow_downgrade: bool = False,
+    ) -> AdbResult:
+        paths = [Path(p) for p in apk_paths]
+        if not paths:
+            raise AdbError("No APK files for install-multiple")
+        for path in paths:
+            if not path.is_file():
+                raise AdbError(f"APK file not found: {path}")
+        args = ["install-multiple"]
+        if replace:
+            args.append("-r")
+        if allow_downgrade:
+            args.append("-d")
+        args.extend(str(p.resolve()) for p in paths)
+        # Split packages / XAPK can be hundreds of MB
+        return self.run(args, serial=serial, check=False, timeout=900.0)
+
     def uninstall(self, serial: str, package_name: str) -> AdbResult:
         pkg = (package_name or "").strip()
         if not pkg:

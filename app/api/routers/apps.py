@@ -11,6 +11,8 @@ from app.api.schemas import (
     AppActionOut,
     AppOut,
     AppPermissionIn,
+    ClearInstallFlagIn,
+    ClearInstallFlagOut,
     MessageOut,
     SetAppSourceIn,
     SetUpdateIgnoreIn,
@@ -87,6 +89,7 @@ def list_apps(
                 update_ignored=a.package_name in ignored,
                 install_flag=str(fl.get("flag") or ""),
                 install_flag_source=str(fl.get("source") or ""),
+                install_flag_message=str(fl.get("message") or ""),
             )
         )
     return out
@@ -123,6 +126,7 @@ def put_update_ignore(body: SetUpdateIgnoreIn, request: Request) -> UpdateIgnore
             update_ignored=bool(body.ignored),
             install_flag=str(fl.get("flag") or ""),
             install_flag_source=str(fl.get("source") or ""),
+            install_flag_message=str(fl.get("message") or ""),
         )
     msg = (
         f"{pkg}: обновления отключены"
@@ -130,6 +134,39 @@ def put_update_ignore(body: SetUpdateIgnoreIn, request: Request) -> UpdateIgnore
         else f"{pkg}: обновления снова разрешены"
     )
     return UpdateIgnoreOut(message=msg, app=app_row)
+
+
+@router.put("/api/apps/install-flag/clear", response_model=ClearInstallFlagOut)
+def clear_install_flag(body: ClearInstallFlagIn, request: Request) -> ClearInstallFlagOut:
+    """Allow auto-update again after signature / older_sdk block."""
+    state = request.app.state.api
+    serial = (body.serial or "").strip()
+    pkg = (body.package_name or "").strip()
+    if not serial or not pkg:
+        raise HTTPException(status_code=400, detail="serial и package_name обязательны")
+    clear_flag(state.db, serial, pkg)
+    app_row: AppOut | None = None
+    cached = next(
+        (a for a in state.get_apps(serial) if a.package_name == pkg),
+        None,
+    )
+    if cached is not None:
+        src = resolve_preferred_source(
+            state.db, serial, pkg, installer=cached.installer
+        )
+        tip = install_source_tooltip(src, cached.installer)
+        ignored = list_ignored(state.db, serial)
+        app_row = app_out(
+            cached,
+            state.get_updates(serial).get(pkg),
+            install_source=src,
+            install_source_tooltip=tip,
+            update_ignored=pkg in ignored,
+        )
+    return ClearInstallFlagOut(
+        message=f"{pkg}: пометка снята, автообновление снова разрешено",
+        app=app_row,
+    )
 
 
 @router.put("/api/apps/source", response_model=MessageOut)

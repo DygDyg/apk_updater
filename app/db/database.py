@@ -4,9 +4,35 @@ import sqlite3
 import time
 from pathlib import Path
 
-from app.paths import DB_PATH, ensure_data_dirs
+from app.paths import BUNDLE_DIR, DB_PATH, ensure_data_dirs
 
-_SCHEMA = (Path(__file__).with_name("schema.sql")).read_text(encoding="utf-8")
+
+def _load_schema() -> str:
+    """DDL for migrate(); file next to module, PyInstaller datas, or embedded fallback."""
+    candidates = (
+        Path(__file__).with_name("schema.sql"),
+        BUNDLE_DIR / "app" / "db" / "schema.sql",
+    )
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    try:
+        from app.db._schema_embed import SCHEMA_SQL
+
+        if SCHEMA_SQL.strip():
+            return SCHEMA_SQL
+    except Exception:  # noqa: BLE001
+        pass
+    tried = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        f"schema.sql not found (tried: {tried}; embed missing). Rebuild with build.bat."
+    )
+
+
+_SCHEMA = _load_schema()
 
 # Backoff minutes by attempt index (capped)
 _PENDING_BACKOFF_MIN = (1, 5, 15, 60)
@@ -24,6 +50,7 @@ class Database:
     def migrate(self) -> None:
         self._conn.executescript(_SCHEMA)
         self._ensure_device_columns()
+        self._ensure_install_flag_columns()
         self._conn.commit()
 
     def _ensure_device_columns(self) -> None:
@@ -42,6 +69,16 @@ class Database:
         for col, typ in extras.items():
             if col not in existing:
                 self._conn.execute(f"ALTER TABLE devices ADD COLUMN {col} {typ}")
+
+    def _ensure_install_flag_columns(self) -> None:
+        rows = self._conn.execute("PRAGMA table_info(package_install_flags)").fetchall()
+        if not rows:
+            return
+        existing = {r[1] for r in rows}
+        if "version_code" not in existing:
+            self._conn.execute(
+                "ALTER TABLE package_install_flags ADD COLUMN version_code INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         self._conn.close()

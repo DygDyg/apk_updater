@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -19,9 +18,11 @@ from app.services.qr_pairing import QrPairingResult, QrPairingService, QrPairing
 from app.services.transport import (
     extract_ip,
     is_ip_transport,
+    mdns_hardware_serial,
     short_transport_label,
     transport_family,
     transport_sort_key,
+    uid_from_mdns,
 )
 
 
@@ -273,22 +274,103 @@ class DeviceService:
         by_uid: dict[str, list[str]] = {}
         by_fam: dict[str, list[str]] = {}
         by_ip: dict[str, list[str]] = {}
+        by_hw: dict[str, list[str]] = {}
         mdns_ip = self._mdns_ip_map()
+        by_serial_map: dict[str, DeviceRecord] = {r.serial: r for r in records}
 
         for r in records:
-            if r.device_uid:
-                by_uid.setdefault(r.device_uid, []).append(r.serial)
-            by_fam.setdefault(transport_family(r.serial), []).append(r.serial)
+            # Always prefer identity embedded in mDNS name (repairs poisoned DB uids)
+            mdns_uid = uid_from_mdns(r.serial)
+            if mdns_uid:
+                r.device_uid = mdns_uid
+            fam = transport_family(r.serial)
+            if fam:
+                by_fam.setdefault(fam, []).append(r.serial)
+            hw = mdns_hardware_serial(r.serial)
+            if hw:
+                by_hw.setdefault(hw.lower(), []).append(r.serial)
+            # UID buckets: mDNS/USB only — never IP:port alone (DHCP + wrong uid
+            # previously glued Quest onto Nothing Phone).
+            if mdns_uid:
+                by_uid.setdefault(mdns_uid.lower(), []).append(r.serial)
+            elif r.device_uid and not extract_ip(r.serial):
+                by_uid.setdefault(r.device_uid.lower(), []).append(r.serial)
             ip = extract_ip(r.serial)
             if not ip:
-                ip = mdns_ip.get(r.serial) or mdns_ip.get(transport_family(r.serial))
+                ip = mdns_ip.get(r.serial) or mdns_ip.get(fam)
             if ip:
                 by_ip.setdefault(ip, []).append(r.serial)
+            # IP row may join by_uid only when a live mDNS service with the
+            # same sn: lives on this exact IP (blocks DHCP / wrong-getprop glue).
+            if extract_ip(r.serial) and (r.device_uid or "").lower().startswith("sn:"):
+                want = (r.device_uid or "").lower()
+                for other in records:
+                    ou = uid_from_mdns(other.serial)
+                    if not ou or ou.lower() != want:
+                        continue
+                    mapped = (
+                        mdns_ip.get(other.serial)
+                        or mdns_ip.get(transport_family(other.serial))
+                        or ""
+                    )
+                    if mapped == extract_ip(r.serial):
+                        by_uid.setdefault(want, []).append(r.serial)
+                        break
 
-        for group in (*by_uid.values(), *by_fam.values(), *by_ip.values()):
-            head = group[0]
-            for s in group[1:]:
-                union(head, s)
+        def _uid_key(rec: DeviceRecord) -> str:
+            return (uid_from_mdns(rec.serial) or rec.device_uid or "").lower()
+
+        def _same_identity(a: str, b: str) -> bool:
+            """Refuse to merge transports that clearly belong to different hardware."""
+            ra, rb = by_serial_map.get(a), by_serial_map.get(b)
+            if ra is None or rb is None:
+                return True
+            ha, hb = mdns_hardware_serial(ra.serial), mdns_hardware_serial(rb.serial)
+            if ha and hb and ha.lower() != hb.lower():
+                return False
+
+            ip_a, ip_b = extract_ip(ra.serial), extract_ip(rb.serial)
+            # IP + mDNS: only if live mDNS map places that service on this IP,
+            # and the IP row is not already identified as other hardware.
+            if (ha and ip_b) or (hb and ip_a):
+                mdns_rec, ip_rec = (ra, rb) if ha else (rb, ra)
+                mdns_hw = (ha or hb).lower()
+                ip = (ip_b if ha else ip_a) or ""
+                fam = transport_family(mdns_rec.serial)
+                mapped = mdns_ip.get(mdns_rec.serial) or mdns_ip.get(fam) or ""
+                if mapped and ip and mapped != ip:
+                    return False
+                if not mapped:
+                    # No live confirmation — do not glue IP to a foreign mDNS name
+                    return False
+                ip_uid = _uid_key(ip_rec)
+                if ip_uid.startswith("sn:") and ip_uid != f"sn:{mdns_hw}":
+                    return False
+                return True
+
+            ua, ub = _uid_key(ra), _uid_key(rb)
+            # Ignore stale uid on pure IP rows when comparing two IPs
+            if extract_ip(ra.serial):
+                ua = uid_from_mdns(ra.serial).lower()  # usually ""
+            if extract_ip(rb.serial):
+                ub = uid_from_mdns(rb.serial).lower()
+            if ua and ub and ua != ub:
+                return False
+            return True
+
+        for group in (
+            *by_uid.values(),
+            *by_fam.values(),
+            *by_hw.values(),
+            *by_ip.values(),
+        ):
+            # Pairwise: union with head alone skipped compatible pairs when head
+            # was a foreign mDNS that failed _same_identity (Quest IP stuck alone
+            # or glued via a later path to the phone).
+            for i, left in enumerate(group):
+                for right in group[i + 1 :]:
+                    if _same_identity(left, right):
+                        union(left, right)
 
         buckets: dict[str, list[DeviceRecord]] = {}
         for r in records:
@@ -322,9 +404,24 @@ class DeviceService:
             seen_family.add(fam)
             ordered.append(s)
 
-        best_meta = max(
-            members,
-            key=lambda r: sum(
+        online = bool(online_members)
+        # Prefer UID from mDNS-embedded hardware serial (trustworthy), then DB
+        mdns_uids = [uid_from_mdns(m.serial) for m in members if uid_from_mdns(m.serial)]
+        shared_uid = (
+            mdns_uids[0]
+            if mdns_uids
+            else (
+                primary.device_uid
+                or next((m.device_uid for m in members if m.device_uid), "")
+            )
+        )
+        shared_l = (shared_uid or "").lower()
+
+        def _meta_score(r: DeviceRecord) -> tuple[int, int]:
+            # Prefer rows whose identity matches the group; then richness
+            own = (uid_from_mdns(r.serial) or r.device_uid or "").lower()
+            match = 1 if (not shared_l or not own or own == shared_l) else 0
+            rich = sum(
                 bool(x)
                 for x in (
                     r.market_name,
@@ -335,17 +432,26 @@ class DeviceService:
                     r.alias,
                     r.device_uid,
                 )
-            ),
-        )
-        online = bool(online_members)
-        shared_uid = (
-            best_meta.device_uid
-            or primary.device_uid
-            or next((m.device_uid for m in members if m.device_uid), "")
-        )
-        # Stamp UID onto all transports so IP ↔ mDNS keep merging next time
+            )
+            return (match, rich)
+
+        best_meta = max(members, key=_meta_score)
+        # Stamp UID onto members that don't conflict with their own mDNS serial
         if shared_uid:
             for m in members:
+                own = uid_from_mdns(m.serial)
+                if own and own.lower() != shared_l:
+                    # Keep correct identity; repair poisoned DB row
+                    if m.device_uid != own:
+                        m.device_uid = own
+                        try:
+                            self.db.execute(
+                                "UPDATE devices SET device_uid = ? WHERE serial = ?",
+                                (own, m.serial),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
                 if m.device_uid == shared_uid:
                     continue
                 m.device_uid = shared_uid
@@ -421,7 +527,12 @@ class DeviceService:
             pass
 
     def read_device_uid(self, serial: str) -> str:
-        """Stable hardware identity: ro.serialno (preferred), then android_id."""
+        """Stable hardware identity: mDNS serial → ro.serialno → android_id."""
+        # Wireless debugging name embeds the real serial — prefer it over getprop
+        # (getprop can hit the wrong device when several are connected).
+        mdns_uid = uid_from_mdns(serial)
+        if mdns_uid:
+            return mdns_uid
         props = (
             "ro.serialno",
             "ro.boot.serialno",
@@ -734,33 +845,60 @@ class DeviceService:
         return sorted(found.values(), key=lambda e: (e.kind.value, e.ip, e.port))
 
     def label_for_discovered(self, ep: DiscoveredEndpoint) -> str:
-        """Friendly name from registry when IP / mDNS matches a known device."""
+        """Friendly name from registry when mDNS serial / IP matches a known device."""
         known = self.list_known()
-        ep_family = transport_family(ep.short_name or ep.name or "")
+        ep_name = ep.short_name or ep.name or ""
+        ep_family = transport_family(ep_name)
+        ep_hw = mdns_hardware_serial(ep_name).lower()
         ep_ip = (ep.ip or "").strip()
-        for rec in known:
-            if ep_ip:
+
+        # 1) Exact hardware serial from mDNS (most reliable)
+        if ep_hw:
+            for rec in known:
                 for t in rec.transports or [rec.serial]:
-                    tip = extract_ip(t)
-                    if tip and tip == ep_ip:
+                    if mdns_hardware_serial(t).lower() == ep_hw:
                         return rec.label
-                if ep_ip in (rec.channels_text or "") or ep_ip in (rec.address or ""):
+                uid = (rec.device_uid or "").lower()
+                if uid in {f"sn:{ep_hw}", ep_hw}:
                     return rec.label
-            if ep_family:
+
+        # 2) Same mDNS family string
+        if ep_family:
+            for rec in known:
                 for t in rec.transports or [rec.serial]:
                     if transport_family(t) == ep_family:
                         return rec.label
-                if rec.device_uid and rec.device_uid.lower() in ep_family:
+
+        # 3) IP match only when the known device's identity doesn't conflict
+        if ep_ip:
+            for rec in known:
+                rec_hw = ""
+                for t in rec.transports or [rec.serial]:
+                    rec_hw = mdns_hardware_serial(t) or rec_hw
+                if ep_hw and rec_hw and ep_hw != rec_hw.lower():
+                    continue
+                tip_hit = False
+                for t in rec.transports or [rec.serial]:
+                    tip = extract_ip(t)
+                    if tip and tip == ep_ip:
+                        tip_hit = True
+                        break
+                if not tip_hit and (
+                    ep_ip in (rec.address or "") or ep_ip == extract_ip(rec.serial or "")
+                ):
+                    tip_hit = True
+                if tip_hit:
                     return rec.label
-                # adb-<serialno>-xxx often embeds hardware serial
-                serial_l = (rec.serial or "").lower()
-                if serial_l and len(serial_l) >= 6 and serial_l in ep_family:
-                    return rec.label
-                uid = (rec.device_uid or "").lower()
-                if uid and len(uid) >= 6 and uid in ep_family:
-                    return rec.label
-        cached = self._probe_label_cache.get(ep.host_port) or self._probe_label_cache.get(ep_ip)
-        return cached or ""
+
+        # Probe cache: host_port first, then mDNS family — never bare IP alone
+        cached = self._probe_label_cache.get(ep.host_port)
+        if cached:
+            return cached
+        if ep_family:
+            cached = self._probe_label_cache.get(f"fam:{ep_family}")
+            if cached:
+                return cached
+        return ""
 
     def probe_discovered_name(self, ep: DiscoveredEndpoint) -> str:
         """
@@ -776,6 +914,12 @@ class DeviceService:
         cached = self._probe_label_cache.get(host_port)
         if cached:
             return cached
+        ep_family = transport_family(ep.short_name or ep.name or "")
+        if ep_family:
+            cached = self._probe_label_cache.get(f"fam:{ep_family}")
+            if cached:
+                self._probe_label_cache[host_port] = cached
+                return cached
 
         live_before = {d.serial for d in self._safe_devices() if d.state == "device"}
         already = host_port in live_before
@@ -823,8 +967,8 @@ class DeviceService:
             label = label.strip()
             if label:
                 self._probe_label_cache[host_port] = label
-                if ep.ip:
-                    self._probe_label_cache[ep.ip] = label
+                if ep_family:
+                    self._probe_label_cache[f"fam:{ep_family}"] = label
             return label
         except AdbError:
             return ""
@@ -863,17 +1007,17 @@ class DeviceService:
             ep0 = by_hp[hp][0]
             return hp, self.probe_discovered_name(ep0)
 
-        with ThreadPoolExecutor(max_workers=min(4, len(by_hp))) as pool:
-            futs = [pool.submit(one, hp) for hp in by_hp]
-            for fut in as_completed(futs):
-                try:
-                    hp, lab = fut.result()
-                except Exception:  # noqa: BLE001
-                    continue
-                if not lab:
-                    continue
-                for ep in by_hp[hp]:
-                    labels[ep.key] = lab
+        # Sequential probes: parallel connect+shell races mis-attribute getprop
+        # across devices (Quest got Nothing Phone's serialno in production DB).
+        for hp in by_hp:
+            try:
+                _hp, lab = one(hp)
+            except Exception:  # noqa: BLE001
+                continue
+            if not lab:
+                continue
+            for ep in by_hp[hp]:
+                labels[ep.key] = lab
         return labels
 
     def connect_discovered(self, endpoint: DiscoveredEndpoint) -> str:
@@ -883,14 +1027,31 @@ class DeviceService:
 
     def pair_discovered(self, endpoint: DiscoveredEndpoint, code: str) -> str:
         msg = self.pair(endpoint.ip, str(endpoint.port), code)
+        # Prefer connect endpoint with the same mDNS hardware serial (Quest / multi-device LAN)
+        ep_hw = mdns_hardware_serial(endpoint.short_name or endpoint.name or "").lower()
         try:
+            found = self.discover_network(duration=4.0)
             connect_eps = [
-                e
-                for e in self.discover_network(duration=3.0)
-                if e.ip == endpoint.ip and e.kind == EndpointKind.CONNECT
+                e for e in found if e.ip == endpoint.ip and e.kind == EndpointKind.CONNECT
             ]
+            if ep_hw:
+                matched = [
+                    e
+                    for e in connect_eps
+                    if mdns_hardware_serial(e.short_name or e.name or "").lower() == ep_hw
+                ]
+                if matched:
+                    connect_eps = matched
+            if not connect_eps:
+                # Pairing port ≠ connect port; wait briefly for tls-connect on same IP
+                waited = self.discovery.wait_for_connect_near(
+                    endpoint.ip, timeout=12.0
+                )
+                if waited is not None:
+                    connect_eps = [waited]
             if connect_eps:
                 self.connect_discovered(connect_eps[0])
+                self.refresh()
         except AdbError:
             pass
         return msg

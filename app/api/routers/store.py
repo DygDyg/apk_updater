@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.api.schemas import StoreInstallIn
 from app.api.sse_job import stream_background_job
@@ -10,6 +16,15 @@ from app.services.store_search import StoreSearchService
 from app.services.updates import UpdateInfo
 
 router = APIRouter(tags=["store"])
+
+_SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _apk_filename(package_name: str, version_code: int | str, version_name: str = "") -> str:
+    pkg = _SAFE_FILENAME.sub("_", (package_name or "app").strip()) or "app"
+    ver = (version_name or str(version_code) or "latest").strip()
+    ver = _SAFE_FILENAME.sub("_", ver) or "latest"
+    return f"{pkg}-{ver}.apk"
 
 
 @router.get("/api/store/search")
@@ -64,6 +79,68 @@ def store_versions(
         "source_title": STORE_TITLES.get(src, src),
         "versions": versions,
     }
+
+
+@router.get("/api/store/download")
+def store_download(
+    request: Request,
+    package: str = Query(..., min_length=1),
+    source: str = Query(..., min_length=1),
+    version_code: int | None = Query(None),
+):
+    """Stream APK to the browser (Content-Disposition: attachment). Not kept in server cache."""
+    package_name = package.strip()
+    src = source.strip()
+    state = request.app.state.api
+    enabled = state.updates.enabled_store_sources()
+    if src not in enabled:
+        raise HTTPException(status_code=400, detail=f"Стор «{src}» выключен")
+
+    provider = state.updates.provider
+    remote = provider.resolve_version(
+        package_name, source=src, version_code=version_code
+    )
+    if remote is None:
+        raise HTTPException(status_code=404, detail="Версия не найдена в сторе")
+    if remote.unsupported_reason and not remote.download_url and not remote.app_id:
+        raise HTTPException(status_code=400, detail=remote.unsupported_reason)
+
+    filename = _apk_filename(
+        package_name, remote.version_code, remote.version_name
+    )
+    headers_out = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+    }
+
+    # Always go through the store provider into a temp dir (handles RuStore /
+    # APKPure headers). File is not written into data/cache/apk.
+    tmp = TemporaryDirectory(prefix="apk_dl_")
+    try:
+        artifact = provider.download(
+            package_name,
+            Path(tmp.name),
+            remote=remote,
+            enabled=enabled,
+        )
+    except Exception as exc:  # noqa: BLE001
+        tmp.cleanup()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    path = Path(artifact.file_path)
+    if not path.is_file():
+        tmp.cleanup()
+        raise HTTPException(status_code=502, detail="APK не получен из стора")
+
+    fname = _apk_filename(
+        artifact.package_name, artifact.version_code, artifact.version_name
+    )
+    return FileResponse(
+        path,
+        media_type="application/vnd.android.package-archive",
+        filename=fname,
+        headers=headers_out,
+        background=BackgroundTask(tmp.cleanup),
+    )
 
 
 @router.post("/api/store/install")
@@ -167,11 +244,33 @@ def store_install(body: StoreInstallIn, request: Request) -> StreamingResponse:
             for serial in serials:
                 item_progress(serial, "downloading", "Скачивание…")
 
+            from app.providers.http_util import format_download_progress
+
+            def on_download(done: int, total: int | None) -> None:
+                detail, pct = format_download_progress(done, total)
+                for serial in serials:
+                    progress(
+                        {
+                            "type": "install_item",
+                            "id": f"{package_name}:{serial}",
+                            "package": package_name,
+                            "app_label": package_name,
+                            "serial": serial,
+                            "device_label": device_labels.get(serial, serial),
+                            "status": "downloading",
+                            "detail": detail,
+                            "download_pct": pct,
+                            "download_bytes": done,
+                            "download_total": total,
+                        }
+                    )
+
             artifact, results = state.updates.download_and_install(
                 update,
                 serials,
                 progress=lambda m: progress({"type": "progress", "message": str(m)}),
                 item_progress=item_progress,
+                download_progress=on_download,
             )
 
             ok = all(r.success for r in results)

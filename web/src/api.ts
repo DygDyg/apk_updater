@@ -48,6 +48,7 @@ export type AppRow = {
   install_flag?: string;
   install_flag_label?: string;
   install_flag_source?: string;
+  install_flag_message?: string;
   remote_version: string;
   remote_source: string;
   stores?: StoreHit[];
@@ -582,6 +583,20 @@ export function setUpdateIgnore(
   );
 }
 
+export function clearInstallFlag(serial: string, packageName: string) {
+  return json<{ message: string; ok: boolean; app: AppRow | null }>(
+    "/api/apps/install-flag/clear",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        serial,
+        package_name: packageName,
+      }),
+    },
+  );
+}
+
 export async function installAllUpdates(
   onEvent: (ev: SseEvent) => void,
   opts?: { serials?: string[] },
@@ -712,4 +727,20 @@ export async function storeInstall(
     body: JSON.stringify(body),
   });
   await readSse(res, onEvent);
+}
+
+/** Browser download URL (attachment). Does not keep the APK in server apk cache. */
+export function storeDownloadHref(
+  packageName: string,
+  source: string,
+  versionCode?: number | null,
+): string {
+  const params = new URLSearchParams({
+    package: packageName,
+    source,
+  });
+  if (versionCode != null && versionCode > 0) {
+    params.set("version_code", String(versionCode));
+  }
+  return `/api/store/download?${params}`;
 }

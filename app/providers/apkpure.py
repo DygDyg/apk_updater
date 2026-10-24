@@ -14,6 +14,13 @@ from .base import (
     StoreVersion,
 )
 from .http_util import DEFAULT_TIMEOUT, download_file
+from .xapk_util import (
+    artifact_from_extracted,
+    extract_xapk,
+    is_xapk_archive,
+    load_extracted_splits,
+    url_looks_like_xapk,
+)
 
 HISTORY_URL = "https://tapi.pureapk.com/v3/get_app_his_version"
 CMS_URL = "https://api.pureapk.com/m/v3/cms/app_version"
@@ -78,8 +85,11 @@ class ApkPureProvider(ApkProvider):
         asset_type = str(asset.get("type") or "").upper()
         url = str(asset.get("url") or "")
         unsupported = ""
-        if asset_type and asset_type != "APK":
-            unsupported = f"APKPure offers {asset_type}, APK-only supported"
+        if asset_type in ("", "APK", "XAPK"):
+            unsupported = "" if url else "APKPure: нет ссылки на скачивание"
+        else:
+            unsupported = f"APKPure: формат {asset_type} не поддерживается"
+            # Same versionCode may also list a plain APK asset.
             for item in versions:
                 try:
                     code = int(item.get("version_code") or 0)
@@ -88,8 +98,10 @@ class ApkPureProvider(ApkProvider):
                 if code != best_code:
                     continue
                 a = item.get("asset") or {}
-                if str(a.get("type") or "").upper() == "APK" and a.get("url"):
+                t = str(a.get("type") or "").upper()
+                if t in ("APK", "XAPK") and a.get("url"):
                     url = str(a["url"])
+                    asset_type = t
                     unsupported = ""
                     best = item
                     break
@@ -246,18 +258,17 @@ class ApkPureProvider(ApkProvider):
             asset_type = str(asset.get("type") or "").upper()
             url = str(asset.get("url") or "")
             unsupported = ""
-            if asset_type and asset_type != "APK":
-                unsupported = f"APKPure offers {asset_type}, APK-only supported"
+            if asset_type in ("", "APK", "XAPK"):
                 if not url:
-                    unsupported = f"APKPure offers {asset_type}, APK-only supported"
-            elif not url:
-                unsupported = "APKPure: no APK download URL"
+                    unsupported = "APKPure: нет ссылки на скачивание"
+            else:
+                unsupported = f"APKPure: формат {asset_type} не поддерживается"
             out.append(
                 StoreVersion(
                     version_name=str(item.get("version_name") or ""),
                     version_code=code,
                     source=self.name,
-                    download_url=url if asset_type in ("", "APK") else "",
+                    download_url=url if asset_type in ("", "APK", "XAPK") else "",
                     unsupported_reason=unsupported,
                 )
             )
@@ -269,7 +280,14 @@ class ApkPureProvider(ApkProvider):
         out.sort(key=lambda v: v.version_code, reverse=True)
         return out[: max(1, min(int(limit or 20), 50))]
 
-    def download(self, package_name: str, dest_dir: Path, *, remote: RemoteVersion | None = None) -> ApkArtifact:
+    def download(
+        self,
+        package_name: str,
+        dest_dir: Path,
+        *,
+        remote: RemoteVersion | None = None,
+        progress=None,
+    ) -> ApkArtifact:
         info = remote or self.get_latest(package_name)
         if info is None:
             raise RuntimeError(f"APKPure: package not found: {package_name}")
@@ -282,7 +300,123 @@ class ApkPureProvider(ApkProvider):
 
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{info.version_code}.apk"
-        download_file(info.download_url, dest, headers=self._headers())
+        splits_dir = dest_dir / f"{info.version_code}_splits"
+        is_xapk = url_looks_like_xapk(info.download_url)
+
+        # Reuse previous XAPK extract.
+        cached_splits = load_extracted_splits(splits_dir, package_name)
+        if len(cached_splits) > 1:
+            return ApkArtifact(
+                package_name=package_name,
+                version_name=info.version_name,
+                version_code=info.version_code,
+                source=self.name,
+                file_path=cached_splits[0],
+                download_url=info.download_url,
+                split_apks=cached_splits[1:],
+            )
+
+        # Misnamed XAPK left as N.apk by older builds.
+        if dest.is_file() and dest.stat().st_size > 1024 and is_xapk_archive(dest):
+            xapk_path = dest_dir / f"{info.version_code}.xapk"
+            try:
+                if xapk_path.exists() and xapk_path.resolve() != dest.resolve():
+                    xapk_path.unlink()
+                dest.replace(xapk_path)
+            except OSError:
+                xapk_path = dest
+            extracted = extract_xapk(
+                xapk_path, splits_dir, expected_package=package_name
+            )
+            artifact = artifact_from_extracted(
+                extracted,
+                package_name=package_name,
+                version_name=info.version_name,
+                version_code=info.version_code,
+                source=self.name,
+                download_url=info.download_url,
+                single_apk_dest=dest if len(extracted.apks) == 1 else None,
+            )
+            try:
+                if xapk_path.is_file() and artifact.split_apks:
+                    xapk_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return artifact
+
+        if dest.is_file() and dest.stat().st_size > 1024 and not is_xapk:
+            return ApkArtifact(
+                package_name=package_name,
+                version_name=info.version_name,
+                version_code=info.version_code,
+                source=self.name,
+                file_path=dest,
+                download_url=info.download_url,
+            )
+        if dest.is_file() and is_xapk and not is_xapk_archive(dest):
+            # Stale base-only APK while store serves XAPK.
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if is_xapk:
+            xapk_path = dest_dir / f"{info.version_code}.xapk"
+            download_file(
+                info.download_url,
+                xapk_path,
+                headers=self._headers(),
+                progress=progress,
+            )
+            extracted = extract_xapk(
+                xapk_path, splits_dir, expected_package=package_name
+            )
+            artifact = artifact_from_extracted(
+                extracted,
+                package_name=package_name,
+                version_name=info.version_name,
+                version_code=info.version_code,
+                source=self.name,
+                download_url=info.download_url,
+                single_apk_dest=dest if len(extracted.apks) == 1 else None,
+            )
+            try:
+                if xapk_path.is_file() and (
+                    artifact.split_apks or artifact.file_path.resolve() == dest.resolve()
+                ):
+                    xapk_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return artifact
+
+        download_file(
+            info.download_url, dest, headers=self._headers(), progress=progress
+        )
+        # Downloaded «APK» that is actually XAPK (CDN without /XAPK/ in URL).
+        if is_xapk_archive(dest):
+            xapk_path = dest_dir / f"{info.version_code}.xapk"
+            try:
+                dest.replace(xapk_path)
+            except OSError:
+                xapk_path = dest
+            extracted = extract_xapk(
+                xapk_path, splits_dir, expected_package=package_name
+            )
+            artifact = artifact_from_extracted(
+                extracted,
+                package_name=package_name,
+                version_name=info.version_name,
+                version_code=info.version_code,
+                source=self.name,
+                download_url=info.download_url,
+                single_apk_dest=dest if len(extracted.apks) == 1 else None,
+            )
+            try:
+                if xapk_path.is_file() and artifact.split_apks:
+                    xapk_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return artifact
         return ApkArtifact(
             package_name=package_name,
             version_name=info.version_name,

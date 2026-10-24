@@ -39,6 +39,7 @@
 |--------|------|------------|
 | GET | `/api/apps` | Список пакетов (+ update fields) |
 | PUT | `/api/apps/update-ignore` | Не обновлять / снять |
+| PUT | `/api/apps/install-flag/clear` | Снять пометку сбоя (SDK/подпись) |
 | PUT | `/api/apps/source` | Предпочтительный стор |
 | GET | `/api/apps/details` | Детали + permissions |
 | POST | `/api/apps/action` | force_stop / clear_* / uninstall… |
@@ -62,6 +63,7 @@
 | GET | `/api/store/search` | store.py |
 | GET | `/api/store/app` | store.py |
 | GET | `/api/store/versions` | store.py |
+| GET | `/api/store/download` | Скачать APK в браузер (attachment) |
 | POST | `/api/store/install` | store.py (SSE) |
 | POST | `/api/install` | install.py (multipart APK, SSE) |
 | POST | `/api/install/cached` | install.py |

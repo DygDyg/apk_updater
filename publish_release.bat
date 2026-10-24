@@ -54,22 +54,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
-git add -- "app/build_info.py"
-git diff --cached --quiet
+echo Committing pending changes for this release...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\commit_release_changes.ps1" -BuildId "%BUILD_ID%"
 if errorlevel 1 (
-  git commit -m "build %BUILD_ID%"
-  if errorlevel 1 (
-    echo ERROR: git commit failed.
-    pause
-    exit /b 1
-  )
-) else (
-  echo WARN: build_info.py unchanged in index; continuing.
+  echo ERROR: git commit of release changes failed.
+  pause
+  exit /b 1
 )
 
 for /f %%C in ('git status --porcelain ^| find /c /v ""') do set "DIRTY=%%C"
 if not "%DIRTY%"=="0" (
-  echo WARN: Working tree still has local changes; only build_info was committed.
+  echo WARN: Working tree still has unstaged/untracked files after commit.
+  echo       They will NOT be in the git tag; check git status.
 )
 
 echo.
@@ -123,17 +119,30 @@ if not exist "%ZIP%" (
 )
 
 echo.
+echo Writing release notes from git history...
+set "NOTES=%~dp0.release_notes.md"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\write_release_notes.ps1" -Tag "%TAG%" -BuildId "%BUILD_ID%" -OutFile "%NOTES%"
+if errorlevel 1 (
+  echo ERROR: failed to write release notes
+  pause
+  exit /b 1
+)
+
+echo.
 echo Creating GitHub Release %TAG% ...
-gh release create "%TAG%" "%ZIP%" --title "Build %BUILD_ID%" --notes "Portable Windows build %BUILD_ID%" --latest
+gh release create "%TAG%" "%ZIP%" --title "Build %BUILD_ID%" --notes-file "%NOTES%" --latest
 if errorlevel 1 (
   echo ERROR: gh release create failed.
   pause
   exit /b 1
 )
 
+del /f /q "%NOTES%" >nul 2>&1
+
 echo.
 echo OK - published %TAG%
 echo Asset: APKUpdater-windows-x64.zip
+echo Release notes include commits since the previous build-* tag.
 echo.
 pause
 exit /b 0

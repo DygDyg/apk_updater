@@ -10,6 +10,7 @@ a = Analysis(
     datas=[
         ('web/dist', 'web/dist'),
         ('app/resources/play_alarm.dex', 'app/resources'),
+        ('app/db/schema.sql', 'app/db'),
     ],
     hiddenimports=[],
     hookspath=[],

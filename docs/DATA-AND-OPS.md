@@ -22,11 +22,27 @@
 | `setup.bat` | venv + pip + при необходимости `web` build |
 | `run_apk_updater.bat` | Запуск приложения |
 | `stop.bat` | Остановка |
-| `build.bat` | `npm run build` + PyInstaller (`APKUpdater.spec`) |
-| `publish_release.bat` | Stamp сборки → git tag → билд → GitHub Release ZIP |
+| `build.bat` | `npm run build` + embed schema + PyInstaller (`APKUpdater.spec`) |
+| `publish_release.bat` | Stamp → commit всех правок → tag → билд → GitHub Release ZIP; notes = коммиты/файлы с прошлого `build-*` (`tools/commit_release_changes.ps1`, `tools/write_release_notes.ps1`) |
 | `deploy_release.bat` | Копирование релиза; **источник ≠ назначение** |
 
 `.bat`: только ASCII в теле скрипта, CRLF.
+
+## Portable-сборка (PyInstaller datas)
+
+В `_internal` (рядом с EXE) **обязательно** должны лежать:
+
+| Путь в бандле | Источник | Зачем |
+|---------------|----------|--------|
+| `web/dist/**` | `npm run build` | UI |
+| `app/resources/play_alarm.dex` | `tools/play_alarm` | звук alarm на устройстве |
+| `app/db/schema.sql` | `app/db/schema.sql` | DDL при старте БД |
+
+Дополнительно: `app/db/_schema_embed.py` (генерирует `build.bat`) — запасной вариант, если `schema.sql` не попал в datas. `certifi/cacert.pem` подтягивает PyInstaller сам (HTTPS).
+
+`adb` / `scrcpy` в ZIP **не** кладутся — скачиваются в `data/tools/` при первом использовании.
+
+`build.bat` проверяет эти файлы до и после упаковки.
 
 ## Dev-фронт
 

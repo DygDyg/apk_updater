@@ -10,12 +10,12 @@ from app.api.schemas import (
     InstallUpdateIn,
     ReinstallUpdateIn,
 )
-from app.api.serialize import app_out
 from app.api.sse_job import stream_background_job
-from app.services.batch_jobs import cache_snapshot, run_check_batch, run_install_all
-from app.services.package_sources import (
-    install_source_tooltip,
-    resolve_preferred_source,
+from app.services.batch_jobs import (
+    _apps_payload,
+    cache_snapshot,
+    run_check_batch,
+    run_install_all,
 )
 from app.services.updates import UpdateInfo
 
@@ -176,6 +176,26 @@ def install_update(body: InstallUpdateIn, request: Request) -> StreamingResponse
                     }
                 )
 
+            def on_download(done: int, total: int | None) -> None:
+                from app.providers.http_util import format_download_progress
+
+                detail, pct = format_download_progress(done, total)
+                progress(
+                    {
+                        "type": "install_item",
+                        "id": item_id,
+                        "package": body.package_name,
+                        "app_label": app_label,
+                        "serial": serial,
+                        "device_label": device_label,
+                        "status": "downloading",
+                        "detail": detail,
+                        "download_pct": pct,
+                        "download_bytes": done,
+                        "download_total": total,
+                    }
+                )
+
             try:
                 progress(
                     {
@@ -205,6 +225,7 @@ def install_update(body: InstallUpdateIn, request: Request) -> StreamingResponse
                             "detail": detail,
                         }
                     ),
+                    download_progress=on_download,
                 )
             except Exception as exc:  # noqa: BLE001
                 state.db.enqueue_pending(
@@ -225,15 +246,17 @@ def install_update(body: InstallUpdateIn, request: Request) -> StreamingResponse
 
             r = results[0] if results else None
             if r and not r.success:
-                from app.services.install_flags import (
-                    FLAG_OLDER_SDK,
-                    FLAG_SIGNATURE,
-                    set_flag,
-                )
+                from app.services.install_flags import AUTO_BLOCK_FLAGS, set_flag
 
-                permanent = r.error_code in {FLAG_SIGNATURE, FLAG_OLDER_SDK}
+                permanent = r.error_code in AUTO_BLOCK_FLAGS
                 if permanent:
                     try:
+                        remote_vc = 0
+                        if update.remote is not None:
+                            try:
+                                remote_vc = int(update.remote.version_code or 0)
+                            except (TypeError, ValueError):
+                                remote_vc = 0
                         set_flag(
                             state.db,
                             serial,
@@ -241,6 +264,7 @@ def install_update(body: InstallUpdateIn, request: Request) -> StreamingResponse
                             flag=r.error_code,
                             source=(update.remote.source if update.remote else ""),
                             message=r.message or r.error_title or "",
+                            version_code=remote_vc,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -294,33 +318,11 @@ def install_update(body: InstallUpdateIn, request: Request) -> StreamingResponse
                         "detail": "Готово",
                     }
                 )
-            from app.services.update_ignores import list_ignored
-
-            ignored = list_ignored(state.db, serial)
             return {
                 "type": "done",
                 "ok": bool(r and r.success),
                 "message": r.message if r else "Нет результата",
-                "apps": [
-                    app_out(
-                        a,
-                        state.get_updates(serial).get(a.package_name),
-                        install_source=resolve_preferred_source(
-                            state.db, serial, a.package_name, installer=a.installer
-                        ),
-                        install_source_tooltip=install_source_tooltip(
-                            resolve_preferred_source(
-                                state.db,
-                                serial,
-                                a.package_name,
-                                installer=a.installer,
-                            ),
-                            a.installer,
-                        ),
-                        update_ignored=a.package_name in ignored,
-                    ).model_dump()
-                    for a in state.get_apps(serial)
-                ],
+                "apps": _apps_payload(state, serial),
             }
         finally:
             state.end_job()
@@ -400,6 +402,26 @@ def reinstall_update(body: ReinstallUpdateIn, request: Request) -> StreamingResp
                     }
                 )
 
+            def on_download(done: int, total: int | None) -> None:
+                from app.providers.http_util import format_download_progress
+
+                detail, pct = format_download_progress(done, total)
+                progress(
+                    {
+                        "type": "install_item",
+                        "id": item_id,
+                        "package": body.package_name,
+                        "app_label": app_label,
+                        "serial": serial,
+                        "device_label": device_label,
+                        "status": "downloading",
+                        "detail": detail,
+                        "download_pct": pct,
+                        "download_bytes": done,
+                        "download_total": total,
+                    }
+                )
+
             try:
                 _artifact, results = state.updates.download_and_install(
                     update,
@@ -417,6 +439,7 @@ def reinstall_update(body: ReinstallUpdateIn, request: Request) -> StreamingResp
                             "detail": detail,
                         }
                     ),
+                    download_progress=on_download,
                 )
             except Exception as exc:  # noqa: BLE001
                 progress(
@@ -471,33 +494,11 @@ def reinstall_update(body: ReinstallUpdateIn, request: Request) -> StreamingResp
                         **r.as_progress_fields(),
                     }
                 )
-            from app.services.update_ignores import list_ignored
-
-            ignored = list_ignored(state.db, serial)
             return {
                 "type": "done",
                 "ok": bool(r and r.success),
                 "message": r.message if r else "Нет результата",
-                "apps": [
-                    app_out(
-                        a,
-                        state.get_updates(serial).get(a.package_name),
-                        install_source=resolve_preferred_source(
-                            state.db, serial, a.package_name, installer=a.installer
-                        ),
-                        install_source_tooltip=install_source_tooltip(
-                            resolve_preferred_source(
-                                state.db,
-                                serial,
-                                a.package_name,
-                                installer=a.installer,
-                            ),
-                            a.installer,
-                        ),
-                        update_ignored=a.package_name in ignored,
-                    ).model_dump()
-                    for a in state.get_apps(serial)
-                ],
+                "apps": _apps_payload(state, serial),
             }
         finally:
             state.end_job()

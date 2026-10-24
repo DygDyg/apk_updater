@@ -27,6 +27,7 @@ _OLDER_SDK = re.compile(r"INSTALL_FAILED_OLDER_SDK", re.I)
 _NO_MATCHING_ABIS = re.compile(r"INSTALL_FAILED_NO_MATCHING_ABIS", re.I)
 _USER_RESTRICTED = re.compile(r"INSTALL_FAILED_USER_RESTRICTED", re.I)
 _INVALID_APK = re.compile(r"INSTALL_PARSE_FAILED|INSTALL_FAILED_INVALID_APK", re.I)
+_MISSING_SPLIT = re.compile(r"INSTALL_FAILED_MISSING_SPLIT", re.I)
 _ALREADY_EXISTS = re.compile(r"INSTALL_FAILED_ALREADY_EXISTS", re.I)
 _ABORTED = re.compile(r"INSTALL_FAILED_ABORTED|INSTALL_CANCELED", re.I)
 _GENERIC_FAIL = re.compile(r"INSTALL_FAILED_([A-Z0-9_]+)", re.I)
@@ -142,11 +143,24 @@ def classify_install_error(raw: str) -> ClassifiedInstallError | None:
             friendly="Установка запрещена настройками устройства",
         )
 
+    if _MISSING_SPLIT.search(text):
+        return ClassifiedInstallError(
+            code="missing_split",
+            title="Нужны сплиты (XAPK)",
+            hint=(
+                "Поставлен только базовый APK, а приложению нужны дополнительные split-пакеты. "
+                "Повторите установку — программа распакует XAPK и поставит все части через "
+                "install-multiple. При повторе можно удалить файл в кеше data/cache/apk/…"
+            ),
+            actions=(),
+            friendly="Не хватает split APK (XAPK)",
+        )
+
     if _INVALID_APK.search(text):
         return ClassifiedInstallError(
             code="invalid_apk",
             title="Повреждённый APK",
-            hint="Файл APK битый или это не обычный APK (например XAPK/bundle без распаковки).",
+            hint="Файл APK битый или установка сплитов не удалась. Повторите скачивание.",
             actions=(),
             friendly="Некорректный или повреждённый APK",
         )

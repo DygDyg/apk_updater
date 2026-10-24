@@ -230,6 +230,7 @@ class HybridApkProvider(ApkProvider):
         *,
         remote: RemoteVersion | None = None,
         enabled: set[str] | None = None,
+        progress=None,
     ) -> ApkArtifact:
         info = remote or self.get_latest(package_name, enabled=enabled)
         if info is None:
@@ -249,7 +250,9 @@ class HybridApkProvider(ApkProvider):
                 )
                 if use_remote is None:
                     continue
-                return provider.download(package_name, dest_dir, remote=use_remote)
+                return provider.download(
+                    package_name, dest_dir, remote=use_remote, progress=progress
+                )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{provider.name}: {exc}")
                 continue

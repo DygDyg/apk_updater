@@ -473,6 +473,44 @@ select:focus {
   word-break: break-word;
 }
 
+.install-dl-bar {
+  width: 100%;
+  height: 6px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+
+.install-dl-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+
+.install-dl-bar-indeterminate {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 55%, transparent) 40%,
+    color-mix(in srgb, var(--accent) 85%, transparent) 50%,
+    color-mix(in srgb, var(--accent) 55%, transparent) 60%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: install-dl-indeterminate 1.2s linear infinite;
+}
+
+@keyframes install-dl-indeterminate {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
 .install-pill {
   font-size: 0.75rem;
   padding: 2px 8px;
@@ -826,6 +864,20 @@ select:focus {
 
 .row-install-flag td {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.install-flag-reason {
+  font-size: 0.75rem;
+  color: var(--danger);
+  margin-top: 2px;
+}
+
+.install-flag-banner {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 .btn-ignore-on {

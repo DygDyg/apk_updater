@@ -110,6 +110,9 @@ class InstallService:
         *,
         item_progress: Callable[[str, str, str], None] | None = None,
         allow_downgrade: bool = False,
+        split_apks: list[str | Path] | tuple[str | Path, ...] | None = None,
+        obb_files: list[str | Path] | tuple[str | Path, ...] | None = None,
+        package_name: str = "",
     ) -> list[InstallResult]:
         path = Path(apk_path)
         if not path.is_file():
@@ -119,15 +122,28 @@ class InstallService:
         if not serials:
             raise AdbError("No target devices selected")
 
+        extras = [Path(p) for p in (split_apks or ()) if Path(p).is_file()]
+        all_apks = [path, *extras] if extras else [path]
+        for extra in extras:
+            if extra.suffix.lower() != ".apk":
+                raise AdbError(f"Split must be an .apk: {extra}")
+
         apk_min_sdk = _apk_min_sdk(path)
+        obbs = [Path(p) for p in (obb_files or ()) if Path(p).is_file()]
+        pkg = (package_name or "").strip()
         results: list[InstallResult] = []
         for serial in serials:
             if item_progress:
-                item_progress(
-                    serial,
-                    "installing",
-                    "Установка с даунгрейдом…" if allow_downgrade else "Установка на устройство…",
+                detail = (
+                    "Установка с даунгрейдом…"
+                    if allow_downgrade
+                    else (
+                        f"Установка {len(all_apks)} APK…"
+                        if len(all_apks) > 1
+                        else "Установка на устройство…"
+                    )
                 )
+                item_progress(serial, "installing", detail)
             candidates = (
                 self.devices.transport_candidates(serial) if self.devices is not None else [serial]
             )
@@ -166,9 +182,17 @@ class InstallService:
                                 apk_path=str(path),
                             )
                             break
-                        adb_result = self.adb.install(
-                            cand, path, replace=True, allow_downgrade=allow_downgrade
-                        )
+                        if len(all_apks) > 1:
+                            adb_result = self.adb.install_multiple(
+                                cand,
+                                all_apks,
+                                replace=True,
+                                allow_downgrade=allow_downgrade,
+                            )
+                        else:
+                            adb_result = self.adb.install(
+                                cand, path, replace=True, allow_downgrade=allow_downgrade
+                            )
                         text = adb_result.combined
                         lowered = text.lower()
                         success = (
@@ -177,6 +201,10 @@ class InstallService:
                             and "failure" not in lowered
                             and "failed" not in lowered
                         )
+                        if success and obbs and pkg:
+                            if item_progress:
+                                item_progress(serial, "installing", "Копирование OBB…")
+                            self._push_obb_files(cand, pkg, obbs)
                         note = ""
                         if cand != serial and len(candidates) > 1:
                             note = f" [via {cand}]"
@@ -208,6 +236,13 @@ class InstallService:
             results.append(last)
             self._record_history(last)
         return results
+
+    def _push_obb_files(self, serial: str, package_name: str, obb_files: list[Path]) -> None:
+        remote_dir = f"/sdcard/Android/obb/{package_name}"
+        self.adb.shell(serial, f"mkdir -p {remote_dir}", check=False, timeout=30.0)
+        for obb in obb_files:
+            remote = f"{remote_dir}/{obb.name}"
+            self.adb.push(serial, obb, remote, timeout=600.0)
 
     def uninstall_on_device(self, serial: str, package_name: str) -> InstallResult:
         candidates = (

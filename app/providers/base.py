@@ -24,6 +24,10 @@ class ApkArtifact:
     source: str
     file_path: Path
     download_url: str = ""
+    # Extra split APKs for `adb install-multiple` (XAPK / App Bundle unpack).
+    split_apks: tuple[Path, ...] = ()
+    # OBB payloads to push under /sdcard/Android/obb/<package>/
+    obb_files: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,5 +143,15 @@ class ApkProvider(ABC):
         return None
 
     @abstractmethod
-    def download(self, package_name: str, dest_dir: Path, *, remote: RemoteVersion | None = None) -> ApkArtifact:
-        """Download APK into dest_dir and return artifact info."""
+    def download(
+        self,
+        package_name: str,
+        dest_dir: Path,
+        *,
+        remote: RemoteVersion | None = None,
+        progress=None,
+    ) -> ApkArtifact:
+        """Download APK into dest_dir and return artifact info.
+
+        ``progress`` is optional ``Callable[[int, int | None], None]`` (done, total).
+        """

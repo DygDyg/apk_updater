@@ -262,7 +262,12 @@ class FDroidProvider(ApkProvider):
         return out
 
     def download(
-        self, package_name: str, dest_dir: Path, *, remote: RemoteVersion | None = None
+        self,
+        package_name: str,
+        dest_dir: Path,
+        *,
+        remote: RemoteVersion | None = None,
+        progress=None,
     ) -> ApkArtifact:
         info = remote or self.get_latest(package_name)
         if info is None:
@@ -272,7 +277,7 @@ class FDroidProvider(ApkProvider):
         )
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{info.version_code}.apk"
-        download_file(url, dest, headers=self._headers())
+        download_file(url, dest, headers=self._headers(), progress=progress)
         return ApkArtifact(
             package_name=package_name,
             version_name=info.version_name,

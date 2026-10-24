@@ -52,7 +52,9 @@ import {
   setAppPermission,
   setAppSource,
   setUpdateIgnore,
+  clearInstallFlag,
   storeApp,
+  storeDownloadHref,
   storeInstall,
   storeSearch,
   storeVersions,
@@ -141,6 +143,9 @@ type InstallProgressItem = {
   actions?: string[];
   apk_path?: string;
   raw_detail?: string;
+  download_pct?: number | null;
+  download_bytes?: number | null;
+  download_total?: number | null;
 };
 
 function formatRunAt(raw: string | null | undefined): string {
@@ -410,7 +415,13 @@ export default function App() {
       ) {
         return false;
       }
-      if (updatesOnly && !a.has_update && !a.manual_update) return false;
+      if (
+        updatesOnly &&
+        !a.has_update &&
+        !a.manual_update &&
+        !a.install_flag
+      )
+        return false;
       if (!q) return true;
       return (
         a.label.toLowerCase().includes(q) ||
@@ -420,14 +431,17 @@ export default function App() {
     return rows.sort((a, b) => {
       const u = Number(b.has_update) - Number(a.has_update);
       if (u !== 0) return u;
+      const f = Number(Boolean(b.install_flag)) - Number(Boolean(a.install_flag));
+      if (f !== 0) return f;
       const m = Number(Boolean(b.manual_update)) - Number(Boolean(a.manual_update));
       if (m !== 0) return m;
       return a.label.localeCompare(b.label, "ru");
     });
   }, [apps, filter, hidePlay, updatesOnly]);
 
+  const appDetailsRow = apps.find((a) => a.package_name === appDetailsPkg);
   const appDetailsIgnored = Boolean(
-    apps.find((a) => a.package_name === appDetailsPkg)?.update_ignored,
+    appDetailsRow?.update_ignored,
   );
 
   const run = useCallback(async (label: string, fn: () => Promise<void>) => {
@@ -988,6 +1002,11 @@ export default function App() {
         const actions = Array.isArray(actionsRaw)
           ? actionsRaw.map(String)
           : prevItem?.actions;
+        const pctRaw = ev.download_pct;
+        const pctNum =
+          pctRaw != null && pctRaw !== "" ? Number(pctRaw) : undefined;
+        const bytesRaw = ev.download_bytes;
+        const totalRaw = ev.download_total;
         const patch: InstallProgressItem = {
           id,
           package: String(ev.package || prevItem?.package || ""),
@@ -1015,6 +1034,24 @@ export default function App() {
             ev.raw_detail != null
               ? String(ev.raw_detail)
               : prevItem?.raw_detail,
+          download_pct:
+            pctNum != null && Number.isFinite(pctNum)
+              ? pctNum
+              : ev.status === "downloading"
+                ? prevItem?.download_pct
+                : null,
+          download_bytes:
+            bytesRaw != null && bytesRaw !== ""
+              ? Number(bytesRaw)
+              : ev.status === "downloading"
+                ? prevItem?.download_bytes
+                : null,
+          download_total:
+            totalRaw != null && totalRaw !== ""
+              ? Number(totalRaw)
+              : ev.status === "downloading"
+                ? prevItem?.download_total
+                : null,
         };
         if (idx >= 0) next[idx] = { ...next[idx], ...patch };
         else next.push(patch);
@@ -1734,6 +1771,31 @@ export default function App() {
     });
   }
 
+  async function onClearInstallFlag(pkg: string) {
+    if (!selected) return;
+    await run("Снятие пометки…", async () => {
+      const r = await clearInstallFlag(selected, pkg);
+      setMsg(r.message);
+      if (r.app) {
+        const apply = (rows: AppRow[]) =>
+          rows.map((a) => (a.package_name === pkg ? { ...a, ...r.app! } : a));
+        setApps((prev) => apply(prev));
+        setAppsBySerial((prev) => {
+          const rows = prev[selected];
+          if (!rows) return prev;
+          const next = apply(rows);
+          setUpdateCounts((c) => ({
+            ...c,
+            [selected]: next.filter((a) => a.has_update).length,
+          }));
+          return { ...prev, [selected]: next };
+        });
+      } else {
+        await loadCache();
+      }
+    });
+  }
+
   async function onChangeInstallSource(pkg: string, source: string) {
     if (!selected) return;
     await run("Сохранение источника…", async () => {
@@ -2140,10 +2202,15 @@ export default function App() {
                           : storeVer
                             ? `${storeVer}${a.remote_source ? ` (${a.remote_source})` : ""}`
                             : "");
+                      const flagReason =
+                        a.install_flag_message ||
+                        a.install_flag_label ||
+                        a.install_flag ||
+                        "";
                       const statusText = a.update_ignored
                         ? "не обновлять"
                         : a.install_flag
-                          ? a.install_flag_label || "подпись"
+                          ? a.install_flag_label || "ошибка установки"
                           : a.has_update
                             ? "есть обновление"
                             : a.manual_update
@@ -2158,29 +2225,28 @@ export default function App() {
                             : a.manual_update
                               ? "row-manual-update"
                               : undefined;
+                      const rowTitle = a.update_ignored
+                        ? "Обновления отключены для этого приложения"
+                        : a.install_flag
+                          ? [
+                              "Автообновление остановлено",
+                              a.install_flag_label,
+                              a.install_flag_source
+                                ? `стор: ${a.install_flag_source}`
+                                : "",
+                              a.install_flag_message || "",
+                              "Сброс пометки — в свойствах приложения (i).",
+                            ]
+                              .filter(Boolean)
+                              .join(". ")
+                          : a.manual_update
+                            ? "Есть более новая версия в другом сторе — откройте «i» и выберите стор/версию"
+                            : undefined;
                       return (
                         <tr
                           key={a.package_name}
                           className={rowClass}
-                          title={
-                            a.update_ignored
-                              ? "Обновления отключены для этого приложения"
-                              : a.install_flag
-                                ? a.install_flag === "older_sdk"
-                                  ? `Автоустановка остановлена: ${(a.install_flag_label || a.install_flag)}${
-                                      a.install_flag_source
-                                        ? ` (${a.install_flag_source})`
-                                        : ""
-                                    }. APK новее, чем Android на устройстве — нужен апгрейд ОС или другая версия APK.`
-                                  : `Автоустановка: ${(a.install_flag_label || a.install_flag)}${
-                                      a.install_flag_source
-                                        ? ` (${a.install_flag_source})`
-                                        : ""
-                                    }. Можно обновить вручную или переустановить.`
-                                : a.manual_update
-                                  ? "Есть более новая версия в другом сторе — откройте «i» и выберите стор/версию"
-                                  : undefined
-                          }
+                          title={rowTitle}
                         >
                           <td>
                             <div className="app-name">
@@ -2247,9 +2313,24 @@ export default function App() {
                             )}
                           </td>
                           <td className="muted">
-                            <div className="cell-clip" title={storesTip || a.update_badge || statusText}>
+                            <div
+                              className="cell-clip"
+                              title={
+                                a.install_flag
+                                  ? rowTitle
+                                  : storesTip || a.update_badge || statusText
+                              }
+                            >
                               {statusText}
                             </div>
+                            {a.install_flag && flagReason ? (
+                              <div
+                                className="cell-clip install-flag-reason"
+                                title={flagReason}
+                              >
+                                {flagReason}
+                              </div>
+                            ) : null}
                           </td>
                           <td>
                             <div className="row app-actions" style={{ gap: 6, flexWrap: "nowrap" }}>
@@ -3065,6 +3146,30 @@ export default function App() {
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost"
+                    disabled={busy || !storeCardSource}
+                    title="Скачать APK в загрузки браузера (не на сервер)"
+                    onClick={() => {
+                      const d = storeCard.by_source[storeCardSource];
+                      const href = storeDownloadHref(
+                        storeCard.package_name,
+                        storeCardSource,
+                        d?.version_code || null,
+                      );
+                      const a = document.createElement("a");
+                      a.href = href;
+                      a.rel = "noopener";
+                      a.download = "";
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      setMsg("Скачивание APK…");
+                    }}
+                  >
+                    Скачать APK
+                  </button>
+                  <button
+                    type="button"
                     className="btn btn-accent"
                     disabled={busy || !storeCard.sources.length}
                     onClick={() => openStoreInstallDialog()}
@@ -3390,6 +3495,33 @@ export default function App() {
                   </div>
                 )}
 
+                {appDetailsRow?.install_flag ? (
+                  <div className="install-flag-banner">
+                    <strong>
+                      Автообновление остановлено
+                      {appDetailsRow.install_flag_label
+                        ? `: ${appDetailsRow.install_flag_label}`
+                        : ""}
+                    </strong>
+                    <div className="muted" style={{ marginTop: 4 }}>
+                      {appDetailsRow.install_flag_message ||
+                        "Предыдущая установка не удалась. Пакет исключён из автообновления, пока пометку не снимут или в сторе не появится другая версия."}
+                      {appDetailsRow.install_flag_source
+                        ? ` (стор: ${appDetailsRow.install_flag_source})`
+                        : ""}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ marginTop: 8 }}
+                      disabled={appDetailsBusy || busy}
+                      onClick={() => void onClearInstallFlag(appDetailsPkg)}
+                    >
+                      Сбросить пометку
+                    </button>
+                  </div>
+                ) : null}
+
                 <h3 style={{ margin: "16px 0 8px" }}>Действия</h3>
                 <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                   <button
@@ -3625,6 +3757,28 @@ export default function App() {
                         <span className="muted install-progress-detail">{it.detail}</span>
                       )}
                     </div>
+                    {it.status === "downloading" &&
+                    it.download_pct != null &&
+                    Number.isFinite(it.download_pct) ? (
+                      <div
+                        className="install-dl-bar"
+                        role="progressbar"
+                        aria-valuenow={Math.round(it.download_pct)}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                      >
+                        <div
+                          className="install-dl-bar-fill"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, it.download_pct))}%`,
+                          }}
+                        />
+                      </div>
+                    ) : it.status === "downloading" &&
+                      it.download_bytes != null &&
+                      it.download_bytes > 0 ? (
+                      <div className="install-dl-bar install-dl-bar-indeterminate" />
+                    ) : null}
                   </li>
                 ))}
               </ul>

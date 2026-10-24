@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 _IP_PORT = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d+)$")
+# adb-<hardwareSerial>-<random> (Wireless debugging mDNS)
+_MDNS_HW_SERIAL = re.compile(r"^adb-([^-]+)-", re.I)
 _MDNS_SUFFIXES = (
     "._adb-tls-connect._tcp",
     "._adb-tls-pairing._tcp",
@@ -24,6 +26,18 @@ def transport_family(serial: str) -> str:
     # Trailing (N) on short names: adb-xxx(2)
     s = re.sub(r"\(\d+\)$", "", s)
     return s.lower()
+
+
+def mdns_hardware_serial(serial: str) -> str:
+    """Hardware serial embedded in ``adb-<serial>-xxxx`` mDNS names (empty if N/A)."""
+    fam = transport_family(serial)
+    m = _MDNS_HW_SERIAL.match(fam)
+    return (m.group(1) or "").strip() if m else ""
+
+
+def uid_from_mdns(serial: str) -> str:
+    hw = mdns_hardware_serial(serial)
+    return f"sn:{hw}" if hw else ""
 
 
 def extract_ip(serial: str) -> str | None:

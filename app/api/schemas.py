@@ -230,6 +230,7 @@ class AppOut(BaseModel):
     install_flag: str = ""
     install_flag_label: str = ""
     install_flag_source: str = ""
+    install_flag_message: str = ""
     remote_version: str = ""
     remote_source: str = ""
     stores: list[StoreHitOut] = Field(default_factory=list)
@@ -252,6 +253,17 @@ class SetUpdateIgnoreIn(BaseModel):
 
 
 class UpdateIgnoreOut(BaseModel):
+    ok: bool = True
+    message: str
+    app: AppOut | None = None
+
+
+class ClearInstallFlagIn(BaseModel):
+    serial: str
+    package_name: str
+
+
+class ClearInstallFlagOut(BaseModel):
     ok: bool = True
     message: str
     app: AppOut | None = None

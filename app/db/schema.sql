@@ -103,13 +103,14 @@ CREATE TABLE IF NOT EXISTS update_ignores (
     PRIMARY KEY (device_serial, package_name)
 );
 
--- Auto-install notes (e.g. signature_mismatch) — skip retry until cleared
+-- Auto-install notes (e.g. signature_mismatch / older_sdk) — skip until cleared
 CREATE TABLE IF NOT EXISTS package_install_flags (
     device_serial TEXT NOT NULL,
     package_name TEXT NOT NULL,
     flag TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT '',
     message TEXT NOT NULL DEFAULT '',
+    version_code INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (device_serial, package_name)
 );

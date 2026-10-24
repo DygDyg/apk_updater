@@ -54,9 +54,10 @@ def app_out(
     update_ignored: bool = False,
     install_flag: str = "",
     install_flag_source: str = "",
+    install_flag_message: str = "",
 ) -> AppOut:
     from app.api.schemas import StoreHitOut
-    from app.services.install_flags import flag_label
+    from app.services.install_flags import flag_blocks_auto, flag_label
     from app.services.package_sources import install_source_tooltip as default_src_tip
     from app.services.package_sources import source_label
 
@@ -110,16 +111,22 @@ def app_out(
     raw_manual = bool(update and update.manual_update)
     flag = (install_flag or "").strip()
     flag_src = (install_flag_source or "").strip()
+    flag_msg = (install_flag_message or "").strip()
+    # Keep first line of message for badge / list (drop adb dump if present)
+    flag_msg_short = flag_msg.split("\n", 1)[0].strip() if flag_msg else ""
+    blocked = bool(flag) and flag_blocks_auto(flag)
     if update_ignored:
         badge = "не обновлять"
         status = "ignored"
         has_update = False
         manual_update = False
-    elif flag:
-        badge = flag_label(flag)
+    elif blocked:
+        label = flag_label(flag) or flag
+        badge = f"{label}: {flag_msg_short}" if flag_msg_short else label
         status = "install_flag"
-        has_update = raw_has
-        manual_update = raw_manual
+        # Exclude from auto / «Обновить все» until flag cleared or remote changes
+        has_update = False
+        manual_update = False
     else:
         badge = update.badge if update else ""
         status = update.status if update else ""
@@ -140,6 +147,7 @@ def app_out(
         install_flag=flag,
         install_flag_label=flag_label(flag) if flag else "",
         install_flag_source=flag_src,
+        install_flag_message=flag_msg_short or flag_msg,
         remote_version=remote_version,
         remote_source=remote_source,
         stores=stores,
